@@ -10,6 +10,8 @@ use unicode_width::UnicodeWidthStr;
 use crate::{
     app::{App, COLUMN_SIZES, Input, Modal, ROW_SIZES, Selection, Target},
     document::{COLUMN_TYPES, is_editable},
+    i18n::{Language, format as tf, text as tr},
+    settings::Settings,
 };
 
 const BG: Color = Color::Rgb(15, 21, 32);
@@ -46,7 +48,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     app.hits.clear();
     if area.width < 55 || area.height < 18 {
         frame.render_widget(
-            Paragraph::new("Enlarge terminal to at least 55 x 18.\nCtrl+S saves / Ctrl+Q quits.")
+            Paragraph::new(tr(app.language(), "ui.small"))
                 .style(base())
                 .wrap(Wrap { trim: false }),
             area,
@@ -61,20 +63,19 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Constraint::Length(2),
     ])
     .split(area);
-    let filename = app
-        .document
-        .path
-        .as_ref()
-        .map_or_else(|| "Untitled.parquet".into(), |p| p.display().to_string());
+    let filename = app.document.path.as_ref().map_or_else(
+        || tr(app.language(), "ui.untitled").into(),
+        |p| p.display().to_string(),
+    );
     let dirty = if app.document.is_dirty() {
-        "  ● UNSAVED"
+        tr(app.language(), "ui.unsaved")
     } else if !app.document.has_saved_file() {
-        "  NEW"
+        tr(app.language(), "ui.new")
     } else {
-        "  SAVED"
+        tr(app.language(), "ui.saved")
     };
     let header = Paragraph::new(Line::from(vec![
-        Span::styled(" PARQUET STUDIO ", active()),
+        Span::styled(format!(" {} ", tr(app.language(), "app.name")), active()),
         Span::styled(format!("  {}", clean_inline(&filename)), base()),
         Span::styled(
             dirty,
@@ -85,18 +86,15 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             }),
         ),
     ]))
-    .block(panel(" Dataset editor "));
+    .block(panel(tr(app.language(), "ui.editor")));
     frame.render_widget(header, sections[0]);
     draw_grid(frame, app, sections[1]);
     draw_preview(frame, app, sections[2]);
     draw_pagination(frame, app, sections[3]);
     let hints = Text::from(vec![
+        Line::styled(tr(app.language(), "ui.hints"), muted()),
         Line::styled(
-            " Enter Edit  C Column  R Row  ^S Save  ^Q Quit  ^Z Undo  ^C/^V Copy/Paste  F1 Help",
-            muted(),
-        ),
-        Line::styled(
-            clean_inline(&app.status),
+            clean_inline(&app.status.render(app.language())),
             base().fg(if app.error { Color::LightRed } else { ACCENT }),
         ),
     ]);
@@ -107,11 +105,14 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 }
 
 fn draw_grid(frame: &mut Frame, app: &mut App, area: Rect) {
-    let block = panel(format!(
-        " {} rows × {} columns  |  {} selection  |  F6 changes selection ",
-        app.document.rows(),
-        app.document.columns(),
-        app.selection.label()
+    let block = panel(tf(
+        app.language(),
+        "ui.grid_title",
+        &[
+            ("rows", app.document.rows().to_string()),
+            ("columns", app.document.columns().to_string()),
+            ("selection", app.selection.label(app.language()).to_string()),
+        ],
     ));
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -128,7 +129,12 @@ fn draw_grid(frame: &mut Frame, app: &mut App, area: Rect) {
     let start_row = app.row / app.visible_rows * app.visible_rows;
     let start_column = app.column / app.visible_columns * app.visible_columns;
     if app.document.columns() == 0 {
-        frame.render_widget(Paragraph::new("\n  Create your dataset\n\n  C  Add the first column (choose a name and type)\n  R  Add a row, then Enter to edit a cell\n\n  Open an existing file: parquet-editor <file.parquet>").style(muted()), inner);
+        frame.render_widget(
+            Paragraph::new(tr(app.language(), "ui.empty_dataset"))
+                .style(muted())
+                .wrap(Wrap { trim: false }),
+            inner,
+        );
         return;
     }
     let slots = app.visible_columns.min(app.document.columns());
@@ -228,7 +234,7 @@ fn draw_grid(frame: &mut Frame, app: &mut App, area: Rect) {
     }
     if app.document.rows() == 0 {
         frame.render_widget(
-            Paragraph::new("  No rows yet. Press R to add a NULL row.").style(muted()),
+            Paragraph::new(tr(app.language(), "ui.no_rows")).style(muted()),
             Rect::new(inner.x, inner.y + 2, inner.width, 1),
         );
     }
@@ -237,26 +243,33 @@ fn draw_grid(frame: &mut Frame, app: &mut App, area: Rect) {
 fn draw_preview(frame: &mut Frame, app: &App, area: Rect) {
     let value = app.document.cell(app.row, app.column).ok();
     let title = if let Some(column) = app.document.frame().columns().get(app.column) {
-        format!(
-            " Cell {}, {} · {} · {}{} ",
-            app.row + 1,
-            app.column + 1,
-            clean_inline(column.name()),
-            column.dtype(),
-            if is_editable(column.dtype()) {
-                ""
-            } else {
-                " · read only"
-            }
+        tf(
+            app.language(),
+            "ui.cell_title",
+            &[
+                ("row", (app.row + 1).to_string()),
+                ("column", (app.column + 1).to_string()),
+                ("name", clean_inline(column.name())),
+                ("type", column.dtype().to_string()),
+                (
+                    "readonly",
+                    if is_editable(column.dtype()) {
+                        ""
+                    } else {
+                        tr(app.language(), "ui.readonly")
+                    }
+                    .into(),
+                ),
+            ],
         )
     } else {
-        " Cell preview ".into()
+        tr(app.language(), "ui.preview").into()
     };
     let text = match value {
-        Some(Some(text)) if text.is_empty() => "\"\" (empty string)".into(),
+        Some(Some(text)) if text.is_empty() => tr(app.language(), "ui.empty_string").into(),
         Some(Some(text)) => clean_multiline(&text),
-        Some(None) => "∅ NULL  —  Delete sets NULL; an empty edit creates an empty string.".into(),
-        None => "Select a cell to preview its value.".into(),
+        Some(None) => tr(app.language(), "ui.null_help").into(),
+        None => tr(app.language(), "ui.select_cell").into(),
     };
     frame.render_widget(
         Paragraph::new(text)
@@ -268,31 +281,45 @@ fn draw_preview(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_pagination(frame: &mut Frame, app: &mut App, area: Rect) {
-    let title = format!(
-        " Pages · Rows {}/{} · Cols {}/{} ",
-        if app.document.rows() == 0 {
-            0
-        } else {
-            app.row / app.visible_rows + 1
-        },
-        app.document.rows().div_ceil(app.visible_rows),
-        if app.document.columns() == 0 {
-            0
-        } else {
-            app.column / app.visible_columns + 1
-        },
-        app.document.columns().div_ceil(app.visible_columns)
+    let row_page = if app.document.rows() == 0 {
+        0
+    } else {
+        app.row / app.visible_rows + 1
+    };
+    let column_page = if app.document.columns() == 0 {
+        0
+    } else {
+        app.column / app.visible_columns + 1
+    };
+    let title = tf(
+        app.language(),
+        "ui.pages",
+        &[
+            ("row_page", row_page.to_string()),
+            (
+                "row_pages",
+                app.document.rows().div_ceil(app.visible_rows).to_string(),
+            ),
+            ("column_page", column_page.to_string()),
+            (
+                "column_pages",
+                app.document
+                    .columns()
+                    .div_ceil(app.visible_columns)
+                    .to_string(),
+            ),
+        ],
     );
     let block = panel(title);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     // Controls are real mouse targets as well as keyboard shortcuts.
     let controls = [
-        (" Rows ".to_string(), None),
+        (tr(app.language(), "ui.rows").to_string(), None),
         ("[-]".into(), Some(Target::RowSize(false))),
         (format!(" {} ", ROW_SIZES[app.row_size]), None),
         ("[+]".into(), Some(Target::RowSize(true))),
-        ("  Cols ".into(), None),
+        (tr(app.language(), "ui.columns").into(), None),
         ("[-]".into(), Some(Target::ColumnSize(false))),
         (format!(" {} ", COLUMN_SIZES[app.column_size]), None),
         ("[+]".into(), Some(Target::ColumnSize(true))),
@@ -322,7 +349,14 @@ fn draw_pagination(frame: &mut Frame, app: &mut App, area: Rect) {
         }
         x += width;
     }
-    let stats = format!("  view {}r × {}c", app.visible_rows, app.visible_columns);
+    let stats = tf(
+        app.language(),
+        "ui.view",
+        &[
+            ("rows", app.visible_rows.to_string()),
+            ("columns", app.visible_columns.to_string()),
+        ],
+    );
     if x + stats.width() as u16 <= inner.right() {
         frame.render_widget(
             Paragraph::new(stats).style(muted()),
@@ -343,47 +377,73 @@ fn centered(area: Rect, width: u16, height: u16) -> Rect {
 }
 
 fn draw_modal(frame: &mut Frame, app: &App, modal: &Modal) {
+    let language = app.language();
     let (title, hint, input, detail, height) = match modal {
         Modal::Edit(input) => (
-            " Edit cell ",
-            "Enter Apply · Alt/Shift+Enter Newline · Esc Cancel",
+            tr(language, "edit.title"),
+            tr(language, "edit.hint"),
             Some(input),
-            "Empty text = empty string. Use Delete in the grid for NULL.".into(),
-            12,
+            tr(language, "edit.detail").into(),
+            13,
         ),
         Modal::Column { name, dtype } => (
-            " Add column ",
-            "Enter Add · Tab/↑/↓ Change type · Esc Cancel",
+            tr(language, "column.title"),
+            tr(language, "column.hint"),
             Some(name),
-            format!(
-                "Type: {}   (String / Int64 / Float64 / Boolean / UInt64)",
-                COLUMN_TYPES[*dtype].0
+            tf(
+                language,
+                "column.detail",
+                &[("type", COLUMN_TYPES[*dtype].0.to_string())],
             ),
-            9,
+            10,
         ),
         Modal::SavePath(input) => (
-            " Save new dataset ",
-            "Enter Save · Esc Cancel",
+            tr(language, "save.title"),
+            tr(language, "save.hint"),
             Some(input),
-            "File path (parent directory must exist):".into(),
-            9,
+            tr(language, "save.detail").into(),
+            10,
         ),
         Modal::Overwrite(path) => (
-            " Overwrite file? ",
-            "Y Overwrite · N Cancel · Esc Cancel",
+            tr(language, "overwrite.title"),
+            tr(language, "overwrite.hint"),
             None,
-            format!("{} already exists. Replace it?", path.display()),
-            8,
+            tf(
+                language,
+                "overwrite.detail",
+                &[("path", path.display().to_string())],
+            ),
+            10,
         ),
         Modal::Quit => (
-            " Unsaved changes ",
-            "Y Save and quit · N Discard and quit · Esc Return",
+            tr(language, "quit.title"),
+            tr(language, "quit.hint"),
             None,
-            "Save your changes before quitting?".into(),
-            8,
+            tr(language, "quit.detail").into(),
+            10,
         ),
+        Modal::DeleteCell { row, column } => (
+            tr(language, "delete.title"),
+            tr(language, "delete.hint"),
+            None,
+            tf(
+                language,
+                "delete.detail",
+                &[
+                    ("row", (row + 1).to_string()),
+                    ("column", (column + 1).to_string()),
+                ],
+            ),
+            10,
+        ),
+        Modal::Settings {
+            draft, selected, ..
+        } => {
+            draw_settings(frame, app, draft, *selected);
+            return;
+        }
         Modal::Help => {
-            draw_help(frame);
+            draw_help(frame, language);
             return;
         }
     };
@@ -392,32 +452,104 @@ fn draw_modal(frame: &mut Frame, app: &App, modal: &Modal) {
     let block = panel(title).border_style(Style::default().fg(ACCENT));
     let inner = block.inner(area);
     frame.render_widget(block, area);
+    let sections = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Min(1),
+        Constraint::Length(2),
+        Constraint::Length(2),
+    ])
+    .split(inner);
     frame.render_widget(
-        Paragraph::new(clean_inline(&detail)).style(muted()),
-        Rect::new(inner.x, inner.y, inner.width, 1),
+        Paragraph::new(clean_inline(&detail))
+            .style(muted())
+            .wrap(Wrap { trim: false }),
+        sections[0],
     );
     frame.render_widget(
-        Paragraph::new(hint).style(base().fg(ACCENT)),
-        Rect::new(inner.x, inner.bottom() - 1, inner.width, 1),
+        Paragraph::new(hint)
+            .style(base().fg(ACCENT))
+            .wrap(Wrap { trim: false }),
+        sections[3],
     );
     if app.error {
         frame.render_widget(
-            Paragraph::new(clean_inline(&app.status)).style(base().fg(Color::LightRed)),
-            Rect::new(inner.x, inner.bottom() - 2, inner.width, 1),
+            Paragraph::new(clean_inline(&app.status.render(language)))
+                .style(base().fg(Color::LightRed))
+                .wrap(Wrap { trim: false }),
+            sections[2],
         );
     }
     if let Some(input) = input {
-        draw_input(
-            frame,
-            input,
-            Rect::new(
-                inner.x,
-                inner.y + 2,
-                inner.width,
-                inner.height.saturating_sub(5).max(1),
-            ),
+        draw_input(frame, input, sections[1]);
+    }
+}
+
+fn draw_settings(frame: &mut Frame, app: &App, draft: &Settings, selected: usize) {
+    let language = draft.language;
+    let area = centered(frame.area(), 84, 15);
+    frame.render_widget(Clear, area);
+    let block = panel(tr(language, "settings.title")).border_style(Style::default().fg(ACCENT));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let sections = Layout::vertical([
+        Constraint::Length(6),
+        Constraint::Min(1),
+        Constraint::Length(2),
+        Constraint::Length(2),
+    ])
+    .split(inner);
+    let language_key = match language {
+        Language::Japanese => "language.ja_JP",
+        Language::English => "language.en_US",
+    };
+    let rows = [
+        ("settings.language", tr(language, language_key).to_string()),
+        ("settings.rows", draft.rows_per_page.to_string()),
+        ("settings.columns", draft.columns_per_page.to_string()),
+    ];
+    for (index, (key, value)) in rows.into_iter().enumerate() {
+        let row = Rect::new(
+            sections[0].x,
+            sections[0].y + index as u16 * 2,
+            sections[0].width,
+            1,
+        );
+        frame.render_widget(
+            Paragraph::new(format!(" {}:  ◀ {value} ▶", tr(language, key)))
+                .style(if selected == index { active() } else { base() }),
+            row,
         );
     }
+    let path = app.settings_path.as_ref().map_or_else(
+        || tr(language, "settings.memory").to_string(),
+        |path| {
+            tf(
+                language,
+                "settings.file",
+                &[("path", path.display().to_string())],
+            )
+        },
+    );
+    frame.render_widget(
+        Paragraph::new(clean_inline(&path))
+            .style(muted())
+            .wrap(Wrap { trim: false }),
+        sections[1],
+    );
+    if app.error {
+        frame.render_widget(
+            Paragraph::new(clean_inline(&app.status.render(language)))
+                .style(base().fg(Color::LightRed))
+                .wrap(Wrap { trim: false }),
+            sections[2],
+        );
+    }
+    frame.render_widget(
+        Paragraph::new(tr(language, "settings.hint"))
+            .style(base().fg(ACCENT))
+            .wrap(Wrap { trim: false }),
+        sections[3],
+    );
 }
 
 fn draw_input(frame: &mut Frame, input: &Input, area: Rect) {
@@ -455,14 +587,14 @@ fn draw_input(frame: &mut Frame, input: &Input, area: Rect) {
     ));
 }
 
-fn draw_help(frame: &mut Frame) {
+fn draw_help(frame: &mut Frame, language: Language) {
     let area = centered(frame.area(), 70, 18);
     frame.render_widget(Clear, area);
-    let help = "C  Add column       R  Add NULL row\nEnter/F2  Edit      Delete  Set NULL\nAlt/Shift+Enter  Newline   ^U  Clear editor\n^S Save   ^Q Quit (Y save / N discard)\n^Z Undo   ^C Copy cell   ^V Paste cell\nArrows  Move     PgUp/PgDn  Row page\nTab/Shift+Tab  Next/previous column page\nHome/End  First/last column; ^ also row\nF6  Cycle cell / row / column selection\nShift+Space Row    Ctrl+Space Column\n[/] Rows per page   -/+ Columns per page\nMouse: cells, headers and footer buttons\nComplex/temporal values: view + preserve\nF1/Enter/Esc Close    ^ means Ctrl";
+    let help = tr(language, "help.text");
     frame.render_widget(
         Paragraph::new(help)
             .style(base())
-            .block(panel(" Keyboard & mouse "))
+            .block(panel(tr(language, "help.title")))
             .wrap(Wrap { trim: false }),
         area,
     );

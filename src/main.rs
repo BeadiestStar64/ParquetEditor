@@ -14,17 +14,41 @@ use crossterm::{
 use parquet_editor::{
     app::{App, Effect},
     document::Document,
+    i18n::{Message, text},
+    settings::Settings,
     ui,
 };
 
 fn main() -> Result<()> {
+    let (settings_path, mut warning) = match Settings::path() {
+        Ok(path) => (Some(path), None),
+        Err(error) => (None, Some(error)),
+    };
+    let settings = settings_path
+        .as_deref()
+        .map(Settings::load)
+        .transpose()
+        .unwrap_or_else(|error| {
+            warning = Some(error);
+            None
+        })
+        .unwrap_or_default();
+    let language = settings.language;
+    run(settings, settings_path, warning)
+        .map_err(|error| anyhow::anyhow!(Message::from_error(&error).render(language)))
+}
+
+fn run(
+    settings: Settings,
+    settings_path: Option<PathBuf>,
+    warning: Option<anyhow::Error>,
+) -> Result<()> {
+    let language = settings.language;
     let mut args = std::env::args_os().skip(1);
     let path = args.next();
     if let Some(arg) = &path {
         if arg == "--help" || arg == "-h" {
-            println!(
-                "Parquet Studio — a typed dataset editor\n\nUsage: parquet-editor [FILE.parquet]\n\nAn existing file is opened; a new path starts an empty dataset.\nWithout a path, Ctrl+S asks where to save.\n\nC: column  R: row  Enter: edit  Ctrl+S: save  Ctrl+Q: quit  F1: help"
-            );
+            println!("{}", text(language, "cli.help"));
             return Ok(());
         }
         if arg == "--version" || arg == "-V" {
@@ -33,7 +57,7 @@ fn main() -> Result<()> {
         }
     }
     if args.next().is_some() {
-        bail!("Usage: parquet-editor [FILE.parquet]");
+        bail!(Message::new("cli.usage"));
     }
     let path = path.map(PathBuf::from);
     let document = match path {
@@ -41,22 +65,34 @@ fn main() -> Result<()> {
         path => Document::new(path),
     };
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
-        bail!("Run this app in an interactive terminal. Use --help for usage.");
+        bail!(Message::new("error.terminal"));
     }
-    let mut app = App::new(document);
+    let mut app = App::with_settings(document, settings, settings_path);
+    if let Some(error) = warning {
+        app.fail(error);
+    }
     let mut clipboard = Clipboard::default();
     let mut terminal = ratatui::init();
     let result = (|| -> Result<()> {
         execute!(io::stdout(), EnableMouseCapture, EnableBracketedPaste)?;
+        // Modern Unix terminals can distinguish Ctrl+comma with the enhanced protocol.
+        // Windows uses native key records instead.
+        #[cfg(not(windows))]
+        execute!(
+            io::stdout(),
+            event::PushKeyboardEnhancementFlags(
+                event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+            )
+        )?;
         while !app.should_quit {
             terminal.draw(|frame| ui::draw(frame, &mut app))?;
             match event::read()? {
                 Event::Key(key) => match app.key(key) {
                     Some(Effect::Copy) => match app.copy_cell().and_then(|v| clipboard.copy(v)) {
                         Ok(system) => app.message(if system {
-                            "Cell copied to clipboard"
+                            "status.copied"
                         } else {
-                            "Cell copied internally (system clipboard unavailable)"
+                            "status.copied_local"
                         }),
                         Err(error) => app.fail(error),
                     },
@@ -75,9 +111,13 @@ fn main() -> Result<()> {
     })();
     // Restore terminal even when draw, input, or clipboard handling fails.
     let cleanup = execute!(io::stdout(), DisableMouseCapture, DisableBracketedPaste);
+    #[cfg(not(windows))]
+    let keyboard_cleanup = execute!(io::stdout(), event::PopKeyboardEnhancementFlags);
     ratatui::restore();
     result?;
-    cleanup.context("Could not disable terminal input extensions")?;
+    cleanup.context(Message::new("error.terminal_cleanup"))?;
+    #[cfg(not(windows))]
+    keyboard_cleanup.context(Message::new("error.terminal_cleanup"))?;
     Ok(())
 }
 
@@ -111,7 +151,10 @@ impl Clipboard {
 
     fn paste(&mut self) -> Result<Option<String>> {
         if self.local_only {
-            return self.local.clone().context("No cell copied yet");
+            return self
+                .local
+                .clone()
+                .context(Message::new("error.clipboard_empty"));
         }
         if self.system.is_none() {
             self.system = arboard::Clipboard::new().ok();
@@ -128,6 +171,6 @@ impl Clipboard {
         }
         self.local
             .clone()
-            .context("Clipboard unavailable and no cell copied yet")
+            .context(Message::new("error.clipboard_unavailable"))
     }
 }

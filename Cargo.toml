@@ -7,8 +7,11 @@ edition = "2024"
 anyhow = "1.0.104"
 arboard = { version = "3.7.0", default-features = false }
 crossterm = "0.29.0"
+directories = "6.0.0"
 polars = { version = "0.55.2", default-features = false, features = ["parquet", "dtype-full"] }
 ratatui = "0.30.2"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
 tempfile = "3.27.0"
 unicode-width = "0.2.2"
 

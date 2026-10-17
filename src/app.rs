@@ -6,10 +6,13 @@ use crossterm::event::{
 };
 use ratatui::layout::Rect;
 
-use crate::document::{COLUMN_TYPES, Document};
+use crate::{
+    document::{COLUMN_TYPES, Document},
+    i18n::{Language, Message, text},
+    settings::Settings,
+};
 
-pub const ROW_SIZES: [usize; 5] = [10, 20, 30, 50, 100];
-pub const COLUMN_SIZES: [usize; 5] = [2, 3, 4, 6, 8];
+pub use crate::settings::{COLUMN_SIZES, ROW_SIZES};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Selection {
@@ -19,12 +22,15 @@ pub enum Selection {
 }
 
 impl Selection {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Cell => "CELL",
-            Self::Row => "ROW",
-            Self::Column => "COLUMN",
-        }
+    pub fn label(self, language: Language) -> &'static str {
+        text(
+            language,
+            match self {
+                Self::Cell => "selection.cell",
+                Self::Row => "selection.row",
+                Self::Column => "selection.column",
+            },
+        )
     }
 }
 
@@ -135,11 +141,23 @@ impl Input {
 #[derive(Clone, Debug)]
 pub enum Modal {
     Edit(Input),
-    Column { name: Input, dtype: usize },
+    Column {
+        name: Input,
+        dtype: usize,
+    },
     SavePath(Input),
     Overwrite(PathBuf),
     Quit,
     Help,
+    DeleteCell {
+        row: usize,
+        column: usize,
+    },
+    Settings {
+        draft: Settings,
+        selected: usize,
+        return_to: Option<Box<Modal>>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -169,7 +187,9 @@ pub struct App {
     pub visible_rows: usize,
     pub visible_columns: usize,
     pub modal: Option<Modal>,
-    pub status: String,
+    pub status: Message,
+    pub settings: Settings,
+    pub settings_path: Option<PathBuf>,
     pub error: bool,
     pub should_quit: bool,
     pub hits: Vec<(Rect, Target)>,
@@ -178,17 +198,35 @@ pub struct App {
 
 impl App {
     pub fn new(document: Document) -> Self {
+        Self::with_settings(document, Settings::default(), None)
+    }
+
+    pub fn with_settings(
+        document: Document,
+        settings: Settings,
+        settings_path: Option<PathBuf>,
+    ) -> Self {
+        let row_size = ROW_SIZES
+            .iter()
+            .position(|&n| n == settings.rows_per_page)
+            .unwrap_or(1);
+        let column_size = COLUMN_SIZES
+            .iter()
+            .position(|&n| n == settings.columns_per_page)
+            .unwrap_or(2);
         Self {
             document,
             row: 0,
             column: 0,
             selection: Selection::Cell,
-            row_size: 1,
-            column_size: 2,
-            visible_rows: 20,
-            visible_columns: 4,
+            row_size,
+            column_size,
+            visible_rows: ROW_SIZES[row_size],
+            visible_columns: COLUMN_SIZES[column_size],
             modal: None,
-            status: "C: add column  R: add row  Enter: edit  F1: help".into(),
+            status: Message::new("status.initial"),
+            settings,
+            settings_path,
             error: false,
             should_quit: false,
             hits: Vec::new(),
@@ -196,12 +234,16 @@ impl App {
         }
     }
 
-    pub fn message(&mut self, text: impl Into<String>) {
-        self.status = text.into();
+    pub fn language(&self) -> Language {
+        self.settings.language
+    }
+
+    pub fn message(&mut self, key: &'static str) {
+        self.status = Message::new(key);
         self.error = false;
     }
-    pub fn fail(&mut self, error: impl std::fmt::Display) {
-        self.status = error.to_string();
+    pub fn fail(&mut self, error: anyhow::Error) {
+        self.status = Message::from_error(&error);
         self.error = true;
     }
 
@@ -215,6 +257,35 @@ impl App {
             return None;
         }
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
+        if (control && key.code == KeyCode::Char(',')) || key.code == KeyCode::F(4) {
+            if let Some(Modal::Settings { return_to, .. }) = self
+                .modal
+                .take_if(|modal| matches!(modal, Modal::Settings { .. }))
+            {
+                self.modal = return_to.map(|modal| *modal);
+            } else {
+                let return_to = self.modal.take().map(Box::new);
+                let mut draft = self.settings.clone();
+                draft.rows_per_page = ROW_SIZES[self.row_size];
+                draft.columns_per_page = COLUMN_SIZES[self.column_size];
+                self.modal = Some(Modal::Settings {
+                    draft,
+                    selected: 0,
+                    return_to,
+                });
+                self.error = false;
+            }
+            return None;
+        }
+        // Confirmation and settings own their keystrokes; global commands must not bypass them.
+        if matches!(
+            self.modal,
+            Some(Modal::DeleteCell { .. } | Modal::Settings { .. })
+        ) {
+            let modal = self.modal.take().unwrap();
+            self.modal_key(modal, key);
+            return None;
+        }
         if control {
             match key.code {
                 KeyCode::Char('q' | 'Q') => {
@@ -244,9 +315,9 @@ impl App {
                 KeyCode::Char('z' | 'Z') if self.modal.is_none() => {
                     if self.document.undo() {
                         self.clamp_selection();
-                        self.message("Undone");
+                        self.message("status.undone");
                     } else {
-                        self.message("Nothing to undo");
+                        self.message("status.no_undo");
                     }
                     return None;
                 }
@@ -286,7 +357,7 @@ impl App {
             KeyCode::Char('r' | 'R') => match self.document.add_row() {
                 Ok(()) => {
                     self.row = self.document.rows() - 1;
-                    self.message("Added a NULL row");
+                    self.message("status.row_added");
                 }
                 Err(error) => self.fail(error),
             },
@@ -296,8 +367,13 @@ impl App {
                     dtype: 0,
                 })
             }
-            KeyCode::Delete => match self.document.set_cell(self.row, self.column, None) {
-                Ok(_) => self.message("Cell set to NULL"),
+            KeyCode::Delete => match self.document.cell(self.row, self.column) {
+                Ok(_) => {
+                    self.modal = Some(Modal::DeleteCell {
+                        row: self.row,
+                        column: self.column,
+                    })
+                }
                 Err(error) => self.fail(error),
             },
             KeyCode::F(6) => {
@@ -341,7 +417,7 @@ impl App {
                     Ok(_) => true,
                     Err(error) => {
                         self.modal = Some(Modal::Edit(input));
-                        self.fail(format!("{error:#}"));
+                        self.fail(error);
                         false
                     }
                 }
@@ -369,9 +445,18 @@ impl App {
     }
 
     fn modal_key(&mut self, modal: Modal, key: KeyEvent) {
+        if let Modal::Settings {
+            draft,
+            selected,
+            return_to,
+        } = modal
+        {
+            self.settings_key(draft, selected, return_to, key);
+            return;
+        }
         if key.code == KeyCode::Esc {
             self.quit_after_save = false;
-            self.message("Cancelled");
+            self.message("status.cancelled");
             return;
         }
         match modal {
@@ -388,10 +473,10 @@ impl App {
                         .set_cell(self.row, self.column, Some(&input.text))
                     {
                         Ok(_) => {
-                            self.message("Cell updated");
+                            self.message("status.cell_updated");
                             return;
                         }
-                        Err(error) => self.fail(format!("{error:#}")),
+                        Err(error) => self.fail(error),
                     }
                 } else {
                     input.handle(key);
@@ -413,7 +498,7 @@ impl App {
                     {
                         Ok(()) => {
                             self.column = self.document.columns() - 1;
-                            self.message("Column added; R adds a row");
+                            self.message("status.column_added");
                             return;
                         }
                         Err(error) => self.fail(error),
@@ -425,7 +510,7 @@ impl App {
             Modal::SavePath(mut input) => {
                 if key.code == KeyCode::Enter {
                     if input.text.trim().is_empty() {
-                        self.fail("Enter a file path");
+                        self.fail(Message::new("error.enter_path").into());
                     } else {
                         let path = PathBuf::from(&input.text);
                         if path.exists() {
@@ -448,7 +533,7 @@ impl App {
                 }
                 KeyCode::Char('n' | 'N') => {
                     self.quit_after_save = false;
-                    self.message("Save cancelled");
+                    self.message("status.save_cancelled");
                 }
                 _ => self.modal = Some(Modal::Overwrite(path)),
             },
@@ -465,7 +550,93 @@ impl App {
                     self.modal = Some(Modal::Help);
                 }
             }
+            Modal::DeleteCell { row, column } => match key.code {
+                KeyCode::Char('y' | 'Y') => match self.document.set_cell(row, column, None) {
+                    Ok(_) => self.message("status.cell_cleared"),
+                    Err(error) => self.fail(error),
+                },
+                KeyCode::Char('n' | 'N') => self.message("status.cancelled"),
+                _ => self.modal = Some(Modal::DeleteCell { row, column }),
+            },
+            Modal::Settings { .. } => unreachable!("Settings handled above"),
         }
+    }
+
+    fn settings_key(
+        &mut self,
+        mut draft: Settings,
+        mut selected: usize,
+        return_to: Option<Box<Modal>>,
+        key: KeyEvent,
+    ) {
+        if key.code == KeyCode::Esc {
+            self.modal = return_to.map(|modal| *modal);
+            self.message("status.cancelled");
+            return;
+        }
+        if key.code == KeyCode::Enter
+            || (key.modifiers.contains(KeyModifiers::CONTROL)
+                && matches!(key.code, KeyCode::Char('s' | 'S')))
+        {
+            if let Some(path) = &self.settings_path
+                && let Err(error) = draft.save(path)
+            {
+                self.fail(error);
+                self.modal = Some(Modal::Settings {
+                    draft,
+                    selected,
+                    return_to,
+                });
+                return;
+            }
+            self.row_size = ROW_SIZES
+                .iter()
+                .position(|&n| n == draft.rows_per_page)
+                .unwrap_or(1);
+            self.column_size = COLUMN_SIZES
+                .iter()
+                .position(|&n| n == draft.columns_per_page)
+                .unwrap_or(2);
+            self.settings = draft;
+            self.modal = return_to.map(|modal| *modal);
+            self.message(if self.settings_path.is_some() {
+                "status.settings_saved"
+            } else {
+                "status.settings_applied"
+            });
+            return;
+        }
+        match key.code {
+            KeyCode::Down | KeyCode::Tab => selected = (selected + 1) % 3,
+            KeyCode::Up | KeyCode::BackTab => selected = (selected + 2) % 3,
+            KeyCode::Left | KeyCode::Right | KeyCode::Char(' ') => {
+                let next = key.code != KeyCode::Left;
+                match selected {
+                    0 => draft.language = draft.language.next(),
+                    1 => {
+                        let index = ROW_SIZES
+                            .iter()
+                            .position(|&n| n == draft.rows_per_page)
+                            .unwrap_or(1);
+                        draft.rows_per_page = ROW_SIZES[step(index, ROW_SIZES.len(), next)];
+                    }
+                    _ => {
+                        let index = COLUMN_SIZES
+                            .iter()
+                            .position(|&n| n == draft.columns_per_page)
+                            .unwrap_or(2);
+                        draft.columns_per_page =
+                            COLUMN_SIZES[step(index, COLUMN_SIZES.len(), next)];
+                    }
+                }
+            }
+            _ => {}
+        }
+        self.modal = Some(Modal::Settings {
+            draft,
+            selected,
+            return_to,
+        });
     }
 
     fn save_current(&mut self) {
@@ -483,7 +654,9 @@ impl App {
     fn write(&mut self, path: &std::path::Path, overwrite: bool) -> bool {
         match self.document.save(path, overwrite) {
             Ok(()) => {
-                self.message(format!("Saved {}", path.display()));
+                self.status =
+                    Message::with("status.saved", &[("path", path.display().to_string())]);
+                self.error = false;
                 if self.quit_after_save {
                     self.should_quit = true;
                 }
@@ -491,7 +664,7 @@ impl App {
                 true
             }
             Err(error) => {
-                self.fail(format!("{error:#}"));
+                self.fail(error);
                 false
             }
         }
@@ -513,8 +686,8 @@ impl App {
             }
         } else {
             match self.document.set_cell(self.row, self.column, value) {
-                Ok(_) => self.message("Cell pasted"),
-                Err(error) => self.fail(format!("{error:#}")),
+                Ok(_) => self.message("status.pasted"),
+                Err(error) => self.fail(error),
             }
         }
     }

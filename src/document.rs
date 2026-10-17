@@ -10,6 +10,8 @@ use polars::prelude::{
 };
 use tempfile::NamedTempFile;
 
+use crate::i18n::Message;
+
 const UNDO_LIMIT: usize = 100;
 
 #[derive(Clone)]
@@ -45,9 +47,11 @@ impl Document {
 
     pub fn open(path: &Path) -> Result<Self> {
         // Disable mmap: Windows must allow replacing the source on save.
-        let frame = ParquetReader::new(Cursor::new(std::fs::read(path)?))
+        let context = || Message::with("error.read", &[("path", path.display().to_string())]);
+        let bytes = std::fs::read(path).with_context(context)?;
+        let frame = ParquetReader::new(Cursor::new(bytes))
             .finish()
-            .with_context(|| format!("Could not read {}", path.display()))?;
+            .with_context(context)?;
         let mut doc = Self::new(Some(path.to_path_buf()));
         doc.current.frame = frame;
         doc.has_saved_file = true;
@@ -99,10 +103,10 @@ impl Document {
 
     pub fn add_column(&mut self, name: &str, dtype: DataType) -> Result<()> {
         let name = name.trim();
-        ensure!(!name.is_empty(), "Column name cannot be empty");
+        ensure!(!name.is_empty(), Message::new("error.column_empty"));
         ensure!(
             self.frame().column(name).is_err(),
-            "Column '{name}' already exists"
+            Message::with("error.column_duplicate", &[("name", name.to_string())])
         );
         let mut frame = self.frame().clone();
         frame.with_column(Column::full_null(name.into(), self.rows(), &dtype))?;
@@ -111,7 +115,7 @@ impl Document {
     }
 
     pub fn add_row(&mut self) -> Result<()> {
-        ensure!(self.columns() > 0, "Add a column first (C)");
+        ensure!(self.columns() > 0, Message::new("error.add_column_first"));
         let mut frame = self.frame().clone();
         let row = DataFrame::full_null(self.frame().schema().as_ref(), 1);
         frame.vstack_mut(&row)?;
@@ -122,7 +126,7 @@ impl Document {
     pub fn cell(&self, row: usize, column: usize) -> Result<Option<String>> {
         ensure!(
             row < self.rows() && column < self.columns(),
-            "No cell selected"
+            Message::new("error.no_cell")
         );
         let value = self.frame().columns()[column].get(row)?;
         Ok(match value {
@@ -139,7 +143,7 @@ impl Document {
     pub fn set_cell(&mut self, row: usize, column: usize, value: Option<&str>) -> Result<bool> {
         ensure!(
             row < self.rows() && column < self.columns(),
-            "No cell selected"
+            Message::new("error.no_cell")
         );
         let original = &self.frame().columns()[column];
         let name = original.name().clone();
@@ -149,13 +153,13 @@ impl Document {
             Some(text) => {
                 ensure!(
                     is_editable(dtype),
-                    "Editing {dtype} is not supported; its values are preserved"
+                    Message::with("error.unsupported_type", &[("type", dtype.to_string())])
                 );
                 if dtype == &DataType::Boolean {
                     let parsed = match text.trim().to_ascii_lowercase().as_str() {
                         "true" | "1" => true,
                         "false" | "0" => false,
-                        _ => bail!("Expected true / false (or 1 / 0)"),
+                        _ => bail!(Message::new("error.boolean")),
                     };
                     Column::new(name.clone(), [parsed])
                 } else {
@@ -166,7 +170,9 @@ impl Document {
                     };
                     Column::new(name.clone(), [parsed])
                         .strict_cast(dtype)
-                        .with_context(|| format!("Invalid {dtype} value"))?
+                        .with_context(|| {
+                            Message::with("error.invalid_value", &[("type", dtype.to_string())])
+                        })?
                 }
             }
         };
@@ -185,28 +191,27 @@ impl Document {
     /// Write beside the destination, then atomically replace it after a successful flush.
     /// Saving a failed edit never truncates an existing file.
     pub fn save(&mut self, path: &Path, overwrite: bool) -> Result<()> {
-        ensure!(self.columns() > 0, "Add at least one column before saving");
+        ensure!(self.columns() > 0, Message::new("error.save_no_columns"));
         let parent = path
             .parent()
             .filter(|p| !p.as_os_str().is_empty())
             .unwrap_or(Path::new("."));
-        let mut temp =
-            NamedTempFile::new_in(parent).context("Could not create a temporary save file")?;
+        let mut temp = NamedTempFile::new_in(parent).context(Message::new("error.save_temp"))?;
         let mut frame = self.frame().clone();
         ParquetWriter::new(temp.as_file_mut())
             .finish(&mut frame)
-            .context("Could not encode Parquet")?;
+            .context(Message::new("error.save_encode"))?;
         temp.as_file()
             .sync_all()
-            .context("Could not flush Parquet to disk")?;
+            .context(Message::new("error.save_flush"))?;
         if overwrite {
             temp.persist(path)
                 .map_err(|e| e.error)
-                .context("Could not replace destination")?;
+                .context(Message::new("error.save_replace"))?;
         } else {
             temp.persist_noclobber(path)
                 .map_err(|e| e.error)
-                .context("Destination exists or cannot be created")?;
+                .context(Message::new("error.save_create"))?;
         }
         self.path = Some(path.to_path_buf());
         self.saved_id = self.current.id;

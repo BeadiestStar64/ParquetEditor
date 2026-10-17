@@ -65,6 +65,7 @@ fn clipboard_effects_paste_entire_cell_and_preserve_null_and_empty() {
     app.paste(Some(""));
     assert_eq!(app.document.cell(1, 0).unwrap(), Some("".into()));
     app.key(key(KeyCode::Delete));
+    app.key(key(KeyCode::Char('y')));
     assert_eq!(app.document.cell(1, 0).unwrap(), None);
 }
 
