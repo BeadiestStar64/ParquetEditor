@@ -37,7 +37,7 @@ $exists = $LASTEXITCODE -eq 0
 if (-not $exists) {
     $notes = Join-Path $AssetDirectory 'release-notes.md'
     [System.IO.File]::WriteAllText($notes, @"
-mainの更新から自動作成したリリースです。
+masterの更新から自動作成したリリースです。
 
 コミット: $Commit
 
@@ -51,9 +51,9 @@ WindowsはZIP、Ubuntu・macOSはtar.gzを展開し、端末から実行して�
 & gh release upload $Tag @assets --clobber
 if ($LASTEXITCODE -ne 0) { throw 'Asset upload failed; release was not published' }
 
-# An older build finishing later must not replace a newer main release as Latest.
-$head = & gh api 'repos/{owner}/{repo}/git/ref/heads/main' --jq '.object.sha'
-if ($LASTEXITCODE -ne 0) { throw 'Could not resolve main before publishing' }
+# An older build finishing later must not replace a newer master release as Latest.
+$head = & gh api 'repos/{owner}/{repo}/git/ref/heads/master' --jq '.object.sha'
+if ($LASTEXITCODE -ne 0) { throw 'Could not resolve master before publishing' }
 $latest = if ($head.Trim() -eq $Commit) { '--latest' } else { '--latest=false' }
 & gh release edit $Tag --draft=false $latest
 if ($LASTEXITCODE -ne 0) { throw 'Could not publish release' }
