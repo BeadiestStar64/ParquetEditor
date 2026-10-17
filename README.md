@@ -77,6 +77,24 @@ cargo build --locked --release
 - ファイル全体をメモリーに読み込みます。Undo は Polars の列バッファーを共有しますが、変更した列の履歴に応じてメモリーを使用します。巨大ファイルのストリーミング編集、外部からの同時変更の検知、元ファイル固有の Parquet メタデータ・圧縮設定の保持には対応していません。
 - キー操作には端末側の割り当てが影響します。`Ctrl+V` を端末の貼り付けに割り当てている場合も、対応端末の bracketed paste を処理します。
 
+## 自動リリース
+
+`.github/workflows/release.yml` が `main` へのpushで起動します。Actions画面からの手動実行も可能です（`main` を選択してください）。6環境すべてでリリースモードのテスト・ビルド・実行ファイルの起動確認を行い、成功した場合にGitHub Releaseを公開します。
+
+| OS / ランナー | x86_64（64bit Intel / AMD） | ARM64 |
+| --- | --- | --- |
+| Windows | `windows-2025` / `x86_64-pc-windows-msvc` | `windows-11-arm` / `aarch64-pc-windows-msvc` |
+| Ubuntu 24.04 | `ubuntu-24.04` / `x86_64-unknown-linux-gnu` | `ubuntu-24.04-arm` / `aarch64-unknown-linux-gnu` |
+| macOS | `macos-15-intel` / `x86_64-apple-darwin` | `macos-15` / `aarch64-apple-darwin` |
+
+ここでのx86はx86_64、ArmはARM64を指します。32bitのx86 / ARMは対象外です。macOS版は署名・公証を行っていません。
+
+タグは `v<Cargo.tomlのversion>-main.<実行番号>.<コミット先頭7文字>` です。バージョン番号を変更しなくても、`main` の更新ごとに異なるリリースを作成します。再実行時は同じタグのリリースを更新します。公開にはジョブの `GITHUB_TOKEN` を使用するため、追加のシークレットは不要です。リポジトリ・組織側でActionsとリリースへの書き込みが許可されている必要があります。
+
+Windows用は `.zip`、Ubuntu・macOS用は実行権限を保持した `.tar.gz` を公開します。各アーカイブには実行ファイル・README・翻訳JSONを含め、6ファイルのSHA-256を `SHA256SUMS` にまとめます。Ubuntu版はUbuntu 24.04を基準にビルドします。
+
+全ビルドの成功後にドラフトを作成し、ファイルをアップロードしてから公開します。失敗した場合は未公開のドラフトが残ることがあります。古いコミットのビルドが後から完了した場合、最新の `main` 向けリリースのLatest表示は上書きしません。
+
 ## 検証
 
 ```powershell
