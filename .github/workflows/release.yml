@@ -2,7 +2,7 @@ name: Release
 
 on:
   push:
-    branches: master
+    branches: [master]
   workflow_dispatch:
 
 permissions:
@@ -15,7 +15,7 @@ env:
 
 jobs:
   prepare:
-    if: github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/master'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     outputs:
@@ -39,7 +39,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'cargo metadata failed' }
           $package = ($metadata | ConvertFrom-Json).packages | Where-Object name -eq 'parquet-editor'
           if (-not $package) { throw 'parquet-editor package not found' }
-          $tag = "v$($package.version)-main.$env:GITHUB_RUN_NUMBER.$($env:GITHUB_SHA.Substring(0, 7))"
+          $tag = "v$($package.version)-master.$env:GITHUB_RUN_NUMBER.$($env:GITHUB_SHA.Substring(0, 7))"
           "tag=$tag" >> $env:GITHUB_OUTPUT
 
   build:
